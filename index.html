@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>flipit</title>
+  <style>
+    :root {
+      --bg: #0e0e10;
+      --bg-2: #0a0a0c;
+      --panel: #1c1c20;
+      --panel-2: #26262c;
+      --fg: #e6e6e6;
+      --fg-dim: #aaa;
+      --fg-dimmer: #777;
+      --border: #2a2a30;
+      --border-strong: #444;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0; height: 100%; overflow: hidden;
+      background: var(--bg); color: var(--fg);
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    /* ---------- Upload screen ---------- */
+    .upload-screen {
+      position: absolute; inset: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 14px;
+      transition: opacity 0.2s ease;
+    }
+    .upload-screen.dragging { background: #14141a; }
+    .title { font-size: 22px; font-weight: 600; letter-spacing: 0.5px; color: #f4f4f4; margin-bottom: 4px; }
+    .upload-btn {
+      padding: 14px 28px; font-size: 15px;
+      border: 1px solid var(--border-strong); background: var(--panel); color: var(--fg);
+      border-radius: 10px; cursor: pointer;
+      transition: background 0.15s, border-color 0.15s, transform 0.12s;
+    }
+    .upload-btn:hover { background: var(--panel-2); border-color: #666; transform: translateY(-1px); }
+    .upload-btn:active { transform: translateY(0); }
+    .upload-hint { font-size: 13px; color: var(--fg-dimmer); }
+
+    /* ---------- Viewer ---------- */
+    .viewer { display: none; position: absolute; inset: 0; flex-direction: column; }
+    .viewer.active { display: flex; }
+
+    .stage {
+      flex: 1; min-height: 0; min-width: 0;
+      display: flex; align-items: center; justify-content: center;
+      perspective: 2400px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* The book is a 2-page spread. Zoom/pan apply here. */
+    .book {
+      position: relative;
+      transform-style: preserve-3d;
+      will-change: transform;
+    }
+
+    .half {
+      position: absolute;
+      top: 0;
+      width: 50%;
+      height: 100%;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .half.left  { left: 0; }
+    .half.right { left: 50%; }
+
+    .half canvas {
+      display: block;
+      width: 100%; height: 100%;
+      background: #fff;
+      border-radius: 2px;
+      box-shadow:
+        0 30px 80px rgba(0,0,0,0.55),
+        0 6px 18px rgba(0,0,0,0.35);
+    }
+
+    /* The flipper is a temporary half-page overlay used ONLY during a flip
+       animation. Pivot is the spine; back-face shows the next page beneath. */
+    .flipper {
+      position: absolute;
+      top: 0;
+      width: 50%;
+      height: 100%;
+      transform-style: preserve-3d;
+      pointer-events: none;
+      display: none;
+      transition: transform 0.18s cubic-bezier(0.45, 0.05, 0.25, 1);
+      z-index: 2;
+    }
+    .flipper.active { display: block; }
+    .flipper.right-side { left: 50%; transform-origin:   0% 50%; }
+    .flipper.left-side  { left: 0;   transform-origin: 100% 50%; }
+
+    .flipper canvas {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      background: #fff;
+      border-radius: 2px;
+      backface-visibility: hidden;
+      -webkit-backface-visibility: hidden;
+    }
+    #flipBack { transform: rotateY(180deg); }
+
+    /* ---------- Footer ---------- */
+    .footer {
+      padding: 10px 16px;
+      display: flex; align-items: center; justify-content: space-between; gap: 16px;
+      font-size: 12.5px; color: var(--fg-dim);
+      border-top: 1px solid var(--border);
+      background: var(--bg-2);
+    }
+    .footer .help { color: var(--fg-dimmer); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .footer .info { color: #d6d6d6; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .footer button {
+      background: none; border: 1px solid #333; color: #ccc;
+      padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 12px;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .footer button:hover { border-color: #666; color: #fff; }
+
+    .toast {
+      position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+      background: #1d1d22; border: 1px solid #3a3a44; color: #f0d6a0;
+      padding: 8px 14px; border-radius: 8px; font-size: 13px;
+      opacity: 0; pointer-events: none; transition: opacity 0.25s ease;
+    }
+    .toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <div class="upload-screen" id="uploadScreen">
+    <div class="title">flipit</div>
+    <button class="upload-btn" id="uploadBtn">Choose PDF</button>
+    <div class="upload-hint">or drop a PDF anywhere</div>
+    <input type="file" id="fileInput" accept="application/pdf,.pdf" style="display:none" />
+  </div>
+
+  <div class="viewer" id="viewer">
+    <div class="stage" id="stage">
+      <div class="book" id="book">
+        <div class="half left"  id="leftHalf"><canvas id="leftCanvas"></canvas></div>
+        <div class="half right" id="rightHalf"><canvas id="rightCanvas"></canvas></div>
+        <div class="flipper" id="flipper">
+          <canvas id="flipFront"></canvas>
+          <canvas id="flipBack"></canvas>
+        </div>
+      </div>
+      <div class="toast" id="toast"></div>
+    </div>
+    <div class="footer">
+      <div class="help">&larr; &rarr; page &nbsp;·&nbsp; Q / E zoom &nbsp;·&nbsp; W A S D pan &nbsp;·&nbsp; Esc reset</div>
+      <div class="info" id="info">- / -</div>
+      <button id="newPdfBtn" title="Load a different PDF">New PDF</button>
+    </div>
+  </div>
+
+  <!-- PDF.js UMD (v3.x): works from file:// and from any HTTP server. -->
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+  <script>
+    (function () {
+      'use strict';
+
+      const PDFJS = window.pdfjsLib;
+      PDFJS.GlobalWorkerOptions.workerSrc =
+        'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+
+      // ---------- DOM ----------
+      const uploadScreen = document.getElementById('uploadScreen');
+      const uploadBtn    = document.getElementById('uploadBtn');
+      const fileInput    = document.getElementById('fileInput');
+      const viewer       = document.getElementById('viewer');
+      const stage        = document.getElementById('stage');
+      const bookEl       = document.getElementById('book');
+      const leftCanvas   = document.getElementById('leftCanvas');
+      const rightCanvas  = document.getElementById('rightCanvas');
+      const flipper      = document.getElementById('flipper');
+      const flipFront    = document.getElementById('flipFront');
+      const flipBack     = document.getElementById('flipBack');
+      const info         = document.getElementById('info');
+      const newPdfBtn    = document.getElementById('newPdfBtn');
+      const toast        = document.getElementById('toast');
+
+      // ---------- State ----------
+      const state = {
+        pdf: null,
+        numPages: 0,
+        spreadIndex: 0,         // 0 = (blank, page 1); N>=1 = (page 2N, page 2N+1)
+        flipping: false,
+        scale: 1,
+        panX: 0,
+        panY: 0,
+        pageAspect: 0.7071,     // single-page width / height
+      };
+
+      // ---------- Tunables ----------
+      const RENDER_SCALE = 2;            // PDF.js render scale (sharpness)
+      const FLIP_MS      = 180;          // page flip duration (must match CSS)
+      const ZOOM_MIN     = 1.0;
+      const ZOOM_MAX     = 4.0;
+      const ZOOM_RATE    = 7.8;          // zoom units per second while W/S held
+      const PAN_RATE     = 1400;         // px per second while A/D held
+      const TAP_PAN      = 90;           // minimum pan delta on a quick tap
+      const PAGE_MARGIN  = 8;            // tiny buffer between book and stage edges at zoom 1
+
+      // ---------- rAF input state ----------
+      const heldKeys     = new Set();    // currently-held view keys (lowercase)
+      // Q/E zoom, WASD pan
+      const VIEW_KEYS    = new Set(['q','e','w','a','s','d']);
+      let rafId          = 0;
+      let lastFrameTs    = 0;
+
+      // ---------- Spread math ----------
+      // Layout convention (LTR, like a hardcover book):
+      //   spread 0 : (blank, 1)         ← "cover" / title page on the right
+      //   spread N : (2N, 2N+1)         ← interior spreads
+      // Either side may be null (e.g. last spread of an even-paged book).
+      function maxSpread() {
+        if (state.numPages <= 1) return 0;
+        return Math.floor(state.numPages / 2);
+      }
+      function spreadPages(n) {
+        if (n === 0) return { left: null, right: state.numPages >= 1 ? 1 : null };
+        const L = 2 * n;
+        const R = 2 * n + 1;
+        return {
+          left:  L <= state.numPages ? L : null,
+          right: R <= state.numPages ? R : null,
+        };
+      }
+      function spreadLabel(n) {
+        const { left, right } = spreadPages(n);
+        if (left == null && right == null) return '-';
+        if (left == null)  return `${right}`;
+        if (right == null) return `${left}`;
+        return `${left}\u2013${right}`;
+      }
+
+      // ---------- Small helpers ----------
+      function showToast(msg, ms = 1400) {
+        toast.textContent = msg;
+        toast.classList.add('show');
+        clearTimeout(showToast._t);
+        showToast._t = setTimeout(() => toast.classList.remove('show'), ms);
+      }
+
+      function fitBookSize() {
+        if (!state.pageAspect) return;
+        const sw = stage.clientWidth  - PAGE_MARGIN * 2;
+        const sh = stage.clientHeight - PAGE_MARGIN * 2;
+        if (sw <= 0 || sh <= 0) return;
+        const spreadAspect = state.pageAspect * 2;   // two pages side-by-side
+        let w = sw, h = sw / spreadAspect;
+        if (h > sh) { h = sh; w = h * spreadAspect; }
+        bookEl.style.width  = w + 'px';
+        bookEl.style.height = h + 'px';
+      }
+
+      async function pageAspectOf(num) {
+        if (num == null) return null;
+        try {
+          const p = await state.pdf.getPage(num);
+          const vp = p.getViewport({ scale: 1 });
+          return vp.width / vp.height;
+        } catch { return null; }
+      }
+
+      async function renderPageToCanvas(pageNum, canvas) {
+        if (pageNum == null) {
+          // Blank "page": opaque white, sized loosely so layout is stable.
+          const dpr = Math.min(window.devicePixelRatio || 1, 2);
+          const w = Math.max(1, Math.round(800 * dpr));
+          const h = Math.max(1, Math.round(w / state.pageAspect));
+          canvas.width = w; canvas.height = h;
+          const ctx = canvas.getContext('2d', { alpha: false });
+          ctx.fillStyle = '#fff';
+          ctx.fillRect(0, 0, w, h);
+          return;
+        }
+        const pdfPage = await state.pdf.getPage(pageNum);
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const viewport = pdfPage.getViewport({ scale: RENDER_SCALE * dpr });
+        canvas.width  = viewport.width;
+        canvas.height = viewport.height;
+        const ctx = canvas.getContext('2d', { alpha: false });
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        await pdfPage.render({ canvasContext: ctx, viewport }).promise;
+      }
+
+      // Cheap snapshot of an existing canvas to another (no PDF.js round-trip).
+      function copyCanvas(src, dst) {
+        const w = src.width || 1, h = src.height || 1;
+        dst.width = w; dst.height = h;
+        const ctx = dst.getContext('2d', { alpha: false });
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, w, h);
+        ctx.drawImage(src, 0, 0);
+      }
+
+      // ---------- View transform (zoom/pan) ----------
+      function applyViewTransform() {
+        // No CSS transition on .book — rAF loop or tap nudges write the truth.
+        bookEl.style.transform =
+          `translate(${state.panX}px, ${state.panY}px) scale(${state.scale})`;
+      }
+
+      function clampPan() {
+        const bw = bookEl.clientWidth  * state.scale;
+        const bh = bookEl.clientHeight * state.scale;
+        const sw = stage.clientWidth;
+        const sh = stage.clientHeight;
+        const maxX = Math.max(0, (bw - sw) / 2);
+        const maxY = Math.max(0, (bh - sh) / 2);
+        state.panX = Math.max(-maxX, Math.min(maxX, state.panX));
+        state.panY = Math.max(-maxY, Math.min(maxY, state.panY));
+      }
+
+      function resetView() {
+        state.scale = 1; state.panX = 0; state.panY = 0;
+        applyViewTransform();
+      }
+
+      function updateInfo() {
+        info.textContent = state.numPages
+          ? `${spreadLabel(state.spreadIndex)} / ${state.numPages}`
+          : '- / -';
+      }
+
+      async function renderSpread(n) {
+        const { left, right } = spreadPages(n);
+        // Initial fit with whatever aspect we have, then refine after we know the page's aspect.
+        fitBookSize();
+        const aspect = await pageAspectOf(left ?? right);
+        if (aspect && Math.abs(aspect - state.pageAspect) > 0.005) {
+          state.pageAspect = aspect;
+          fitBookSize();
+        }
+        await Promise.all([
+          renderPageToCanvas(left,  leftCanvas),
+          renderPageToCanvas(right, rightCanvas),
+        ]);
+      }
+
+      // ---------- Flip ----------
+      function waitForTransition(el, fallbackMs) {
+        return new Promise((resolve) => {
+          let done = false;
+          const finish = () => {
+            if (done) return;
+            done = true;
+            el.removeEventListener('transitionend', onEnd);
+            resolve();
+          };
+          const onEnd = (e) => {
+            if (e.target === el && e.propertyName === 'transform') finish();
+          };
+          el.addEventListener('transitionend', onEnd);
+          setTimeout(finish, fallbackMs);
+        });
+      }
+
+      // Sequence for forward flip ("next"):
+      //   flipper covers the RIGHT half; pivots on its left edge (spine).
+      //   flipFront = current right page (snapshot of rightCanvas).
+      //   flipBack  = next left page.
+      //   While the flipper rotates 0 → -180:
+      //     - it lifts off the right, revealing rightCanvas which we pre-swap
+      //       to the next right page (hidden under the flipper at the start);
+      //     - it lands on the left, covering leftCanvas which we swap to the
+      //       next left page just before removing the flipper.
+      //
+      // Backward flip ("prev") is the exact mirror on the left side.
+      async function flip(direction) {
+        if (!state.pdf || state.flipping) return;
+        const N = state.spreadIndex;
+        const target = direction === 'next' ? N + 1 : N - 1;
+        if (target < 0 || target > maxSpread()) return;
+
+        state.flipping = true;
+        heldKeys.clear();
+        resetView();
+
+        const isNext = direction === 'next';
+        const nxt = spreadPages(target);
+
+        // 1) Prepare flipper faces (don't show flipper yet).
+        try {
+          if (isNext) {
+            copyCanvas(rightCanvas, flipFront);
+            await renderPageToCanvas(nxt.left, flipBack);
+          } else {
+            copyCanvas(leftCanvas, flipFront);
+            await renderPageToCanvas(nxt.right, flipBack);
+          }
+        } catch (err) {
+          console.error('flipper render failed', err);
+          state.flipping = false;
+          showToast('Failed to render page');
+          return;
+        }
+
+        // 2) Activate flipper at rotateY(0) so it covers the active half
+        //    seamlessly (flipFront matches what's already on screen there).
+        flipper.classList.remove('left-side', 'right-side');
+        flipper.classList.add('active', isNext ? 'right-side' : 'left-side');
+        flipper.style.transition = 'transform 0s';
+        flipper.style.transform  = 'rotateY(0deg)';
+        // Force a commit of the initial state so the next transform animates.
+        // eslint-disable-next-line no-unused-expressions
+        flipper.offsetHeight;
+        flipper.style.transition = '';
+
+        // 3) Update the half that will be REVEALED as the flipper rotates away.
+        try {
+          if (isNext) await renderPageToCanvas(nxt.right, rightCanvas);
+          else        await renderPageToCanvas(nxt.left,  leftCanvas);
+        } catch (err) {
+          console.error('reveal-side render failed', err);
+        }
+
+        // 4) Animate.
+        const endDeg = isNext ? -180 : 180;
+        flipper.style.transform = `rotateY(${endDeg}deg)`;
+        await waitForTransition(flipper, FLIP_MS + 200);
+
+        // 5) Update the half the flipper LANDS on (still covered by flipper).
+        try {
+          if (isNext) await renderPageToCanvas(nxt.left,  leftCanvas);
+          else        await renderPageToCanvas(nxt.right, rightCanvas);
+        } catch (err) {
+          console.error('landing-side render failed', err);
+        }
+
+        // 6) Snap flipper back to neutral and hide it.
+        flipper.classList.remove('active');
+        flipper.style.transition = 'transform 0s';
+        flipper.style.transform  = 'rotateY(0deg)';
+
+        state.spreadIndex = target;
+        state.flipping = false;
+        updateInfo();
+      }
+
+      // ---------- Flip queue ----------
+      // Multiple quick arrow-key presses each register a flip and execute in
+      // order, so a fast double-tap always animates both pages. Bounded to
+      // avoid runaway queueing if the key is mashed.
+      const MAX_PENDING_FLIPS = 5;
+      let pendingFlipCount = 0;
+      let flipChain = Promise.resolve();
+
+      function requestFlip(direction) {
+        if (!state.pdf) return;
+        if (pendingFlipCount >= MAX_PENDING_FLIPS) return;
+        pendingFlipCount++;
+        flipChain = flipChain.then(async () => {
+          try { await flip(direction); }
+          catch (err) { console.error('flip error', err); }
+          finally { pendingFlipCount--; }
+        });
+      }
+
+      // ---------- Zoom / Pan ----------
+      // Per-frame rAF loop; CSS transitions are intentionally not used here
+      // because they introduce input lag. Single taps still feel responsive
+      // because nudgeOnKeyDown applies an immediate delta on initial press.
+      function tick(ts) {
+        rafId = 0;
+        const dt = lastFrameTs ? Math.min(0.05, (ts - lastFrameTs) / 1000) : 0;
+        lastFrameTs = ts;
+
+        if (!state.flipping && state.pdf && heldKeys.size > 0) {
+          let dirty = false;
+          // Zoom: E in, Q out.
+          if (heldKeys.has('e') && state.scale < ZOOM_MAX) {
+            state.scale = Math.min(ZOOM_MAX, state.scale + ZOOM_RATE * dt);
+            dirty = true;
+          }
+          if (heldKeys.has('q') && state.scale > ZOOM_MIN) {
+            state.scale = Math.max(ZOOM_MIN, state.scale - ZOOM_RATE * dt);
+            dirty = true;
+          }
+          // Pan: WASD — only meaningful when zoomed in.
+          if (state.scale > 1.0001) {
+            if (heldKeys.has('a')) { state.panX += PAN_RATE * dt; dirty = true; }
+            if (heldKeys.has('d')) { state.panX -= PAN_RATE * dt; dirty = true; }
+            if (heldKeys.has('w')) { state.panY += PAN_RATE * dt; dirty = true; }
+            if (heldKeys.has('s')) { state.panY -= PAN_RATE * dt; dirty = true; }
+          }
+          if (dirty) {
+            clampPan();
+            applyViewTransform();
+          }
+        }
+
+        if (heldKeys.size > 0) rafId = requestAnimationFrame(tick);
+        else lastFrameTs = 0;
+      }
+
+      function ensureLoop() {
+        if (rafId === 0) {
+          lastFrameTs = 0;
+          rafId = requestAnimationFrame(tick);
+        }
+      }
+
+      function nudgeOnKeyDown(key) {
+        if (state.flipping || !state.pdf) return false;
+        // Zoom keys (Q/E) intentionally have no initial nudge — the rAF loop
+        // ramps the scale continuously from the current value, which feels
+        // smooth instead of snapping. Pan keys still nudge so a single tap
+        // produces a visible movement even if held for only a few ms.
+        let dirty = false;
+        if (state.scale > 1.0001) {
+          switch (key) {
+            case 'a': state.panX += TAP_PAN; dirty = true; break;
+            case 'd': state.panX -= TAP_PAN; dirty = true; break;
+            case 'w': state.panY += TAP_PAN; dirty = true; break;
+            case 's': state.panY -= TAP_PAN; dirty = true; break;
+          }
+        }
+        if (dirty) { clampPan(); applyViewTransform(); }
+        return dirty;
+      }
+
+      // ---------- Loading ----------
+      async function loadPdfFromFile(file) {
+        try {
+          const buf = await file.arrayBuffer();
+          const pdf = await PDFJS.getDocument({ data: buf }).promise;
+
+          state.pdf         = pdf;
+          state.numPages    = pdf.numPages;
+          state.spreadIndex = 0;
+          state.scale = 1; state.panX = 0; state.panY = 0;
+
+          uploadScreen.style.display = 'none';
+          viewer.classList.add('active');
+
+          // Make sure the flipper isn't lingering from a previous document.
+          flipper.classList.remove('active', 'left-side', 'right-side');
+          flipper.style.transition = 'transform 0s';
+          flipper.style.transform  = 'rotateY(0deg)';
+          // eslint-disable-next-line no-unused-expressions
+          flipper.offsetHeight;
+          flipper.style.transition = '';
+
+          await renderSpread(0);
+
+          applyViewTransform();
+          updateInfo();
+        } catch (err) {
+          console.error('PDF load failed', err);
+          alert('Failed to load PDF: ' + (err && err.message ? err.message : err));
+        }
+      }
+
+      function isPdfFile(file) {
+        if (!file) return false;
+        if (file.type === 'application/pdf') return true;
+        return /\.pdf$/i.test(file.name || '');
+      }
+
+      // ---------- Wire UI ----------
+      uploadBtn.addEventListener('click', () => fileInput.click());
+      fileInput.addEventListener('change', () => {
+        const f = fileInput.files && fileInput.files[0];
+        if (f) loadPdfFromFile(f);
+      });
+      newPdfBtn.addEventListener('click', () => {
+        viewer.classList.remove('active');
+        uploadScreen.style.display = 'flex';
+        fileInput.value = '';
+      });
+
+      // Drag & drop anywhere
+      let dragDepth = 0;
+      window.addEventListener('dragenter', (e) => {
+        e.preventDefault(); dragDepth++; uploadScreen.classList.add('dragging');
+      });
+      window.addEventListener('dragover', (e) => { e.preventDefault(); });
+      window.addEventListener('dragleave', () => {
+        dragDepth = Math.max(0, dragDepth - 1);
+        if (dragDepth === 0) uploadScreen.classList.remove('dragging');
+      });
+      window.addEventListener('drop', (e) => {
+        e.preventDefault(); dragDepth = 0;
+        uploadScreen.classList.remove('dragging');
+        const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+        if (!f) return;
+        if (!isPdfFile(f)) { showToast('Please drop a PDF file'); return; }
+        loadPdfFromFile(f);
+      });
+
+      // Keyboard
+      window.addEventListener('keydown', (e) => {
+        if (!state.pdf) return;
+        const t = e.target;
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+
+        const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+        if (VIEW_KEYS.has(k)) {
+          e.preventDefault();
+          if (e.repeat) return;
+          nudgeOnKeyDown(k);
+          heldKeys.add(k);
+          ensureLoop();
+          return;
+        }
+        switch (e.key) {
+          case 'ArrowLeft':  e.preventDefault(); requestFlip('prev'); break;
+          case 'ArrowRight': e.preventDefault(); requestFlip('next'); break;
+          case 'Escape':     e.preventDefault(); resetView(); break;
+        }
+      });
+      window.addEventListener('keyup', (e) => {
+        const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+        if (VIEW_KEYS.has(k)) heldKeys.delete(k);
+      });
+      window.addEventListener('blur', () => { heldKeys.clear(); });
+
+      // Resize
+      let resizeRaf = 0;
+      window.addEventListener('resize', () => {
+        if (resizeRaf) cancelAnimationFrame(resizeRaf);
+        resizeRaf = requestAnimationFrame(fitBookSize);
+      });
+    })();
+  </script>
+</body>
+</html>
